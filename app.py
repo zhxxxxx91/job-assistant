@@ -159,8 +159,7 @@ def load_jobs(excel_bytes):
 
 提示：
 - JD列通常包含公司名、职位、职责等长文本
-- 邮箱列包含@符号的邮箱地址
-- 数据通常从第3-5行开始（前面可能是标题）"""
+- 邮箱列包含@符号的邮箱地址"""
 
     response = client.chat.completions.create(
         model=MODEL_NAME,
@@ -370,29 +369,11 @@ with st.sidebar:
 # ── 主区域：文件上传 ──────────────────────────────────────
 st.header("📂 上传岗位Excel")
 
-col1, col2 = st.columns([2, 1])
-with col1:
-    excel_file = st.file_uploader("📊 岗位Excel", type=["xlsx", "xls"])
-
-with col2:
-    with st.expander("📋 Excel格式说明", expanded=False):
-        st.markdown("""
-**推荐Excel格式：**
-- **JD描述列**：包含公司名、职位、职责等详细信息
-- **HR邮箱列**：包含@符号的有效邮箱地址
-- **数据起始行**：通常从第3-5行开始（前面可能是标题）
-
-**示例格式：**
-```
-第1行: 标题行
-第2行: 说明行  
-第3行: 公司A | 产品经理实习生... | hr@companyA.com
-第4行: 公司B | 数据分析师... | recruit@companyB.com
-```
-
-**AI自动识别：**
-系统会自动分析Excel格式，无需固定列位置
-        """)
+excel_file = st.file_uploader(
+    "📊 岗位Excel", 
+    type=["xlsx", "xls"],
+    help="AI会自动识别Excel格式。推荐包含：JD描述列（公司、职位、职责等）、HR邮箱列"
+)
 
 if not resume_file_sidebar:
     st.info("请先在左侧上传简历PDF")
@@ -426,7 +407,12 @@ mode = st.radio(
 
 if mode == "快速投递":
     # 快速模式：直接选数量
-    max_rows = st.slider("选择投递岗位数量", 1, len(jobs), min(10, len(jobs)))
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        max_rows = st.slider("选择投递岗位数量", 1, len(jobs), min(10, len(jobs)), key="slider_quick")
+    with col2:
+        max_rows = st.number_input("输入数量", 1, len(jobs), max_rows, key="number_quick")
+    
     filtered_jobs_data = jobs[:max_rows]
     
     # 转换为统一格式供后续使用
@@ -513,7 +499,12 @@ else:
 
     st.info(f"筛选后剩余 {len(filtered_jobs)} 个岗位")
 
-    max_rows = st.slider("最多处理岗位数", 1, len(filtered_jobs), min(10, len(filtered_jobs)))
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        max_rows = st.slider("最多处理岗位数", 1, len(filtered_jobs), min(10, len(filtered_jobs)), key="slider_smart")
+    with col2:
+        max_rows = st.number_input("输入数量", 1, len(filtered_jobs), max_rows, key="number_smart")
+    
     filtered_jobs = filtered_jobs[:max_rows]
 
 # 将filtered_jobs转回jobs格式供后续使用
@@ -558,15 +549,21 @@ st.subheader("📋 预览与编辑")
 
 for i, p in enumerate(previews):
     with st.expander(f"{'✅' if p['sent'] else '📧'} {i+1}. {p['company']} — {p['position']}", expanded=not p['sent']):
-        col1, col2 = st.columns([3, 1])
+        col1, col2, col3 = st.columns([2, 1, 1])
         with col1:
             st.write(f"**收件人：** `{p['email']}`")
         with col2:
+            if not p['sent']:
+                test_mode = st.checkbox("发给自己测试", key=f"test_{i}", help="勾选后将发送到自己的邮箱而非HR邮箱")
+        with col3:
             if not p['sent']:
                 if st.button("发送此岗位", key=f"send_{i}", type="primary"):
                     if not sender_email or not auth_code:
                         st.error("请先填写邮箱配置")
                     else:
+                        # 根据测试模式决定收件人
+                        to_addr = sender_email if test_mode else p["email"]
+                        
                         try:
                             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
                                 f.write(resume_bytes)
@@ -574,7 +571,7 @@ for i, p in enumerate(previews):
 
                             msg = MIMEMultipart()
                             msg["From"] = sender_email
-                            msg["To"] = p["email"]
+                            msg["To"] = to_addr
                             msg["Subject"] = p["subject"]
                             msg.attach(MIMEText(p["body"], "plain", "utf-8"))
 
@@ -588,11 +585,12 @@ for i, p in enumerate(previews):
 
                             with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
                                 server.login(sender_email, auth_code)
-                                server.sendmail(sender_email, p["email"], msg.as_string())
+                                server.sendmail(sender_email, to_addr, msg.as_string())
 
                             os.unlink(tmp_pdf)
                             st.session_state.previews[i]["sent"] = True
-                            st.success(f"✅ 已发送到 {p['email']}")
+                            success_msg = f"✅ 已发送到 {to_addr}" + (" (测试模式)" if test_mode else "")
+                            st.success(success_msg)
                             st.rerun()
                         except Exception as e:
                             st.error(f"发送失败：{e}")
