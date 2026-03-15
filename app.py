@@ -315,15 +315,19 @@ with st.sidebar:
     smtp_host, smtp_port = smtp_options[smtp_choice]
 
 # ── 主区域：文件上传 ──────────────────────────────────────
-col1, col2 = st.columns(2)
-with col1:
-    resume_file = st.file_uploader("📄 上传简历 PDF", type=["pdf"])
-with col2:
-    excel_file = st.file_uploader("📊 上传岗位 Excel", type=["xlsx", "xls"])
+st.header("📂 上传岗位Excel")
+excel_file = st.file_uploader("📊 岗位Excel", type=["xlsx", "xls"])
 
-if not resume_file or not excel_file:
-    st.info("请上传简历PDF和岗位Excel后继续")
+if not resume_file_sidebar:
+    st.info("请先在左侧上传简历PDF")
     st.stop()
+
+if not excel_file:
+    st.info("请上传岗位Excel")
+    st.stop()
+
+# 使用侧边栏上传的简历
+resume_bytes = resume_file_sidebar.getvalue()
 
 
 if not all([name, school, major, grade, intern_period, grad_year]):
@@ -333,12 +337,93 @@ if not all([name, school, major, grade, intern_period, grad_year]):
 jobs = load_jobs(excel_file.read())
 st.success(f"读取到 {len(jobs)} 个岗位")
 
-max_rows = st.slider("处理岗位数量", 1, len(jobs), min(5, len(jobs)))
-jobs = jobs[:max_rows]
+# AI分析岗位并分类
+if "parsed_jobs" not in st.session_state:
+    with st.spinner("AI正在分析岗位分类..."):
+        parsed_jobs = []
+        for job in jobs:
+            try:
+                parsed = ai_parse_jd(job["jd"], name, school, major, grad_year, intern_period)
+                parsed["email"] = job["email"]
+                parsed["jd_full"] = job["jd"]
+                parsed_jobs.append(parsed)
+            except Exception as e:
+                continue
+        st.session_state.parsed_jobs = parsed_jobs
 
-# 提取简历亮点
-with st.spinner("AI正在分析简历..."):
-    resume_highlights = extract_resume_highlights(resume_file.read())
+parsed_jobs = st.session_state.parsed_jobs
+
+# 按行业分类
+categories = {}
+for pj in parsed_jobs:
+    company = pj["company"]
+    position = pj["position"]
+    
+    # 根据关键词分类
+    if any(k in position.lower() or k in company.lower() for k in ["科技", "tech", "技术", "ai", "算法"]):
+        cat = "科技类"
+    elif any(k in position.lower() or k in company.lower() for k in ["投资", "pe", "vc", "基金", "资本"]):
+        cat = "投资类"
+    elif any(k in position.lower() or k in company.lower() for k in ["咨询", "consulting", "战略"]):
+        cat = "咨询类"
+    elif any(k in position.lower() or k in company.lower() for k in ["金融", "银行", "证券", "保险"]):
+        cat = "金融类"
+    else:
+        cat = "其他"
+    
+    if cat not in categories:
+        categories[cat] = []
+    categories[cat].append(pj)
+
+# 筛选器
+st.divider()
+st.header("🎯 智能筛选岗位")
+
+selected_categories = st.multiselect(
+    "选择感兴趣的行业类别（可多选）",
+    options=list(categories.keys()),
+    default=list(categories.keys()),
+    help="AI已自动分析岗位类别"
+)
+
+# 显示每个类别的公司并支持多选
+filtered_jobs = []
+for cat in selected_categories:
+    with st.expander(f"📁 {cat} ({len(categories[cat])}个岗位)", expanded=True):
+        companies = list(set([pj["company"] for pj in categories[cat]]))
+        companies.sort()
+        
+        selected_companies = st.multiselect(
+            f"选择{cat}的公司",
+            options=companies,
+            default=companies,
+            key=f"companies_{cat}",
+            help=f"从{len(companies)}家公司中选择"
+        )
+        
+        for pj in categories[cat]:
+            if pj["company"] in selected_companies:
+                filtered_jobs.append(pj)
+
+if not filtered_jobs:
+    st.warning("没有符合筛选条件的岗位，请调整筛选条件")
+    st.stop()
+
+st.info(f"筛选后剩余 {len(filtered_jobs)} 个岗位")
+
+max_rows = st.slider("最多处理岗位数", 1, len(filtered_jobs), min(10, len(filtered_jobs)))
+filtered_jobs = filtered_jobs[:max_rows]
+
+# 将filtered_jobs转回jobs格式供后续使用
+jobs = [{"jd": pj["jd_full"], "email": pj["email"]} for pj in filtered_jobs]
+
+# 提取简历亮点（使用已上传的简历）
+if "resume_highlights" not in st.session_state:
+    with st.spinner("AI正在提取简历亮点..."):
+        resume_highlights = extract_resume_highlights(resume_bytes)
+        st.session_state.resume_highlights = resume_highlights
+else:
+    resume_highlights = st.session_state.resume_highlights
 
 st.info(f"简历亮点：\n{resume_highlights}")
 
@@ -381,7 +466,6 @@ for i, p in enumerate(previews):
                         st.error("请先填写邮箱配置")
                     else:
                         try:
-                            resume_bytes = resume_file.read()
                             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
                                 f.write(resume_bytes)
                                 tmp_pdf = f.name
@@ -434,8 +518,6 @@ if not unsent:
 send_to_self = st.checkbox("📬 先发给自己测试（不发给HR）", value=False)
 
 if st.button(f"批量发送剩余 {len(unsent)} 个岗位", type="primary", use_container_width=True):
-    resume_bytes = resume_file.read()
-
     progress = st.progress(0)
     status_box = st.empty()
 
