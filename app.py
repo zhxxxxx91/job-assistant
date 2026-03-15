@@ -390,82 +390,108 @@ if not all([name, school, major, grade, intern_period, grad_year]):
 jobs = load_jobs(excel_file.read())
 st.success(f"读取到 {len(jobs)} 个岗位")
 
-# AI分析岗位并分类
-if "parsed_jobs" not in st.session_state:
-    with st.spinner("AI正在分析岗位分类..."):
-        parsed_jobs = []
-        for job in jobs:
-            try:
-                parsed = ai_parse_jd(job["jd"], name, school, major, grad_year, intern_period)
-                parsed["email"] = job["email"]
-                parsed["jd_full"] = job["jd"]
-                parsed_jobs.append(parsed)
-            except Exception as e:
-                continue
-        st.session_state.parsed_jobs = parsed_jobs
-
-parsed_jobs = st.session_state.parsed_jobs
-
-# 按行业分类
-categories = {}
-for pj in parsed_jobs:
-    company = pj["company"]
-    position = pj["position"]
-    
-    # 根据关键词分类
-    if any(k in position.lower() or k in company.lower() for k in ["科技", "tech", "技术", "ai", "算法"]):
-        cat = "科技类"
-    elif any(k in position.lower() or k in company.lower() for k in ["投资", "pe", "vc", "基金", "资本"]):
-        cat = "投资类"
-    elif any(k in position.lower() or k in company.lower() for k in ["咨询", "consulting", "战略"]):
-        cat = "咨询类"
-    elif any(k in position.lower() or k in company.lower() for k in ["金融", "银行", "证券", "保险"]):
-        cat = "金融类"
-    else:
-        cat = "其他"
-    
-    if cat not in categories:
-        categories[cat] = []
-    categories[cat].append(pj)
-
-# 筛选器
+# 投递模式选择
 st.divider()
-st.header("🎯 智能筛选岗位")
+st.header("📮 选择投递模式")
 
-selected_categories = st.multiselect(
-    "选择感兴趣的行业类别（可多选）",
-    options=list(categories.keys()),
-    default=list(categories.keys()),
-    help="AI已自动分析岗位类别"
+mode = st.radio(
+    "投递方式",
+    options=["快速投递", "智能筛选"],
+    index=0,
+    help="快速投递：直接选择数量投递 | 智能筛选：AI分析分类后精准投递"
 )
 
-# 显示每个类别的公司并支持多选
-filtered_jobs = []
-for cat in selected_categories:
-    with st.expander(f"📁 {cat} ({len(categories[cat])}个岗位)", expanded=True):
-        companies = list(set([pj["company"] for pj in categories[cat]]))
-        companies.sort()
+if mode == "快速投递":
+    # 快速模式：直接选数量
+    max_rows = st.slider("选择投递岗位数量", 1, len(jobs), min(10, len(jobs)))
+    filtered_jobs_data = jobs[:max_rows]
+    
+    # 转换为统一格式供后续使用
+    filtered_jobs = []
+    for job in filtered_jobs_data:
+        filtered_jobs.append({
+            "company": "待解析",
+            "position": "待解析", 
+            "email": job["email"],
+            "jd_full": job["jd"]
+        })
+
+else:
+    # 智能筛选模式：AI分析分类
+    if "parsed_jobs" not in st.session_state:
+        with st.spinner("AI正在分析岗位分类..."):
+            parsed_jobs = []
+            for job in jobs:
+                try:
+                    parsed = ai_parse_jd(job["jd"], name, school, major, grad_year, intern_period)
+                    parsed["email"] = job["email"]
+                    parsed["jd_full"] = job["jd"]
+                    parsed_jobs.append(parsed)
+                except Exception as e:
+                    continue
+            st.session_state.parsed_jobs = parsed_jobs
+
+    parsed_jobs = st.session_state.parsed_jobs
+
+    # 按行业分类
+    categories = {}
+    for pj in parsed_jobs:
+        company = pj["company"]
+        position = pj["position"]
         
-        selected_companies = st.multiselect(
-            f"选择{cat}的公司",
-            options=companies,
-            default=companies,
-            key=f"companies_{cat}",
-            help=f"从{len(companies)}家公司中选择"
-        )
+        # 根据关键词分类
+        if any(k in position.lower() or k in company.lower() for k in ["科技", "tech", "技术", "ai", "算法"]):
+            cat = "科技类"
+        elif any(k in position.lower() or k in company.lower() for k in ["投资", "pe", "vc", "基金", "资本"]):
+            cat = "投资类"
+        elif any(k in position.lower() or k in company.lower() for k in ["咨询", "consulting", "战略"]):
+            cat = "咨询类"
+        elif any(k in position.lower() or k in company.lower() for k in ["金融", "银行", "证券", "保险"]):
+            cat = "金融类"
+        else:
+            cat = "其他"
         
-        for pj in categories[cat]:
-            if pj["company"] in selected_companies:
-                filtered_jobs.append(pj)
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(pj)
 
-if not filtered_jobs:
-    st.warning("没有符合筛选条件的岗位，请调整筛选条件")
-    st.stop()
+    # 筛选器
+    st.subheader("🎯 智能筛选")
 
-st.info(f"筛选后剩余 {len(filtered_jobs)} 个岗位")
+    selected_categories = st.multiselect(
+        "选择感兴趣的行业类别（可多选）",
+        options=list(categories.keys()),
+        default=list(categories.keys()),
+        help="AI已自动分析岗位类别"
+    )
 
-max_rows = st.slider("最多处理岗位数", 1, len(filtered_jobs), min(10, len(filtered_jobs)))
-filtered_jobs = filtered_jobs[:max_rows]
+    # 显示每个类别的公司并支持多选
+    filtered_jobs = []
+    for cat in selected_categories:
+        with st.expander(f"📁 {cat} ({len(categories[cat])}个岗位)", expanded=True):
+            companies = list(set([pj["company"] for pj in categories[cat]]))
+            companies.sort()
+            
+            selected_companies = st.multiselect(
+                f"选择{cat}的公司",
+                options=companies,
+                default=companies,
+                key=f"companies_{cat}",
+                help=f"从{len(companies)}家公司中选择"
+            )
+            
+            for pj in categories[cat]:
+                if pj["company"] in selected_companies:
+                    filtered_jobs.append(pj)
+
+    if not filtered_jobs:
+        st.warning("没有符合筛选条件的岗位，请调整筛选条件")
+        st.stop()
+
+    st.info(f"筛选后剩余 {len(filtered_jobs)} 个岗位")
+
+    max_rows = st.slider("最多处理岗位数", 1, len(filtered_jobs), min(10, len(filtered_jobs)))
+    filtered_jobs = filtered_jobs[:max_rows]
 
 # 将filtered_jobs转回jobs格式供后续使用
 jobs = [{"jd": pj["jd_full"], "email": pj["email"]} for pj in filtered_jobs]
