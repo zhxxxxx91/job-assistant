@@ -304,7 +304,7 @@ JD摘要：{jd_text[:500]}
 # 页面布局
 # ══════════════════════════════════════════════════════════
 
-st.title("🎯 爽投投")
+st.markdown("<h1 style='font-size: 3rem; margin-bottom: 0;'>🎯 爽投投</h1>", unsafe_allow_html=True)
 st.caption("AI智能求职助手 - 精准筛选、智能生成、高效投递 | 原作者：[@Milkyelephants](https://twitter.com/Milkyelephants)")
 
 # ── 侧边栏：用户配置 ──────────────────────────────────────
@@ -369,7 +369,30 @@ with st.sidebar:
 
 # ── 主区域：文件上传 ──────────────────────────────────────
 st.header("📂 上传岗位Excel")
-excel_file = st.file_uploader("📊 岗位Excel", type=["xlsx", "xls"])
+
+col1, col2 = st.columns([2, 1])
+with col1:
+    excel_file = st.file_uploader("📊 岗位Excel", type=["xlsx", "xls"])
+
+with col2:
+    with st.expander("📋 Excel格式说明", expanded=False):
+        st.markdown("""
+**推荐Excel格式：**
+- **JD描述列**：包含公司名、职位、职责等详细信息
+- **HR邮箱列**：包含@符号的有效邮箱地址
+- **数据起始行**：通常从第3-5行开始（前面可能是标题）
+
+**示例格式：**
+```
+第1行: 标题行
+第2行: 说明行  
+第3行: 公司A | 产品经理实习生... | hr@companyA.com
+第4行: 公司B | 数据分析师... | recruit@companyB.com
+```
+
+**AI自动识别：**
+系统会自动分析Excel格式，无需固定列位置
+        """)
 
 if not resume_file_sidebar:
     st.info("请先在左侧上传简历PDF")
