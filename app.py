@@ -12,7 +12,7 @@ from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-import google.generativeai as genai
+import openai
 import openpyxl
 import PyPDF2
 import streamlit as st
@@ -20,14 +20,16 @@ import streamlit as st
 # ── 页面配置 ──────────────────────────────────────────────
 st.set_page_config(page_title="AI求职助手", page_icon="📨", layout="wide")
 
-# Google Gemini API配置（共享key，从环境变量读取）
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-if not GOOGLE_API_KEY:
+# OpenAI兼容API配置
+API_KEY = os.getenv("API_KEY", "")
+API_BASE = os.getenv("API_BASE", "https://api.siliconflow.cn/v1")  # 默认用SiliconFlow
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
+
+if not API_KEY:
     st.error("未配置API Key，请联系管理员")
     st.stop()
 
-genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+client = openai.OpenAI(api_key=API_KEY, base_url=API_BASE)
 
 st.title("📨 AI求职助手")
 st.caption("上传简历和岗位Excel，自动生成定制邮件并发送")
@@ -115,8 +117,13 @@ def extract_resume_highlights(pdf_bytes):
 - 亮点2
 - 亮点3"""
 
-    response = model.generate_content(prompt)
-    return response.text.strip()
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=500,
+        temperature=0.7
+    )
+    return response.choices[0].message.content.strip()
 
 
 # ── AI解析JD ──────────────────────────────────────────────
@@ -148,11 +155,16 @@ JD内容：
   "resume_format": "简历命名格式（如有要求）或null"
 }}"""
 
-    response = model.generate_content(prompt)
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=300,
+        temperature=0.7
+    )
     
     import json
     # 提取JSON（去掉markdown代码块标记）
-    text = response.text.strip()
+    text = response.choices[0].message.content.strip()
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0].strip()
     elif "```" in text:
@@ -214,8 +226,13 @@ JD摘要：{jd_text[:500]}
 
 直接输出邮件正文，不要任何额外说明。"""
 
-    response = model.generate_content(prompt)
-    return response.text.strip()
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=300,
+        temperature=0.7
+    )
+    return response.choices[0].message.content.strip()
 
 
 # ── 生成预览 ──────────────────────────────────────────────
