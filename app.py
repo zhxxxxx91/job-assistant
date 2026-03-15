@@ -23,7 +23,7 @@ st.set_page_config(page_title="AI求职助手", page_icon="📨", layout="wide")
 # OpenAI兼容API配置
 API_KEY = os.getenv("API_KEY", "")
 API_BASE = os.getenv("API_BASE", "https://bobdong.cn/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
+MODEL_NAME = os.getenv("MODEL_NAME", "Kimi-K2.5")
 
 if not API_KEY:
     st.error("未配置API Key，请联系管理员")
