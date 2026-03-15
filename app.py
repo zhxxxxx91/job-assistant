@@ -4,7 +4,6 @@
 
 import os
 import re
-import shutil
 import smtplib
 import tempfile
 import time
@@ -13,11 +12,22 @@ from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+import google.generativeai as genai
 import openpyxl
+import PyPDF2
 import streamlit as st
 
 # ── 页面配置 ──────────────────────────────────────────────
-st.set_page_config(page_title="AI求职助手", page_icon="📨", layout="centered")
+st.set_page_config(page_title="AI求职助手", page_icon="📨", layout="wide")
+
+# Google Gemini API配置（共享key，从环境变量读取）
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+if not GOOGLE_API_KEY:
+    st.error("未配置API Key，请联系管理员")
+    st.stop()
+
+genai.configure(api_key=GOOGLE_API_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 st.title("📨 AI求职助手")
 st.caption("上传简历和岗位Excel，自动生成定制邮件并发送")
@@ -25,12 +35,12 @@ st.caption("上传简历和岗位Excel，自动生成定制邮件并发送")
 # ── 侧边栏：用户配置 ──────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ 个人配置")
-    name = st.text_input("姓名", value="张衡旭")
-    school = st.text_input("学校", value="浙江大学")
-    major = st.text_input("专业", value="金融学")
-    grade = st.text_input("年级", value="大三")
-    intern_period = st.text_input("可实习时间", value="2025年7月至10月")
-    grad_year = st.text_input("毕业时间", value="2026年6月")
+    name = st.text_input("姓名", placeholder="张三")
+    school = st.text_input("学校", placeholder="清华大学")
+    major = st.text_input("专业", placeholder="计算机科学")
+    grade = st.text_input("年级", placeholder="大三")
+    intern_period = st.text_input("可实习时间", placeholder="2025年7月至10月")
+    grad_year = st.text_input("毕业时间", placeholder="2026年6月")
 
     st.divider()
     st.header("📧 邮箱配置")
@@ -77,168 +87,255 @@ def load_jobs(excel_bytes):
     return jobs
 
 
-def parse_jd(jd_text):
-    first_line = jd_text.split("\n")[0].strip()
-    company = re.split(r"[-–—]", first_line)[0].strip()
-    company = re.sub(r"[【】\[\]「」]", "", company).strip()
+# ── 提取简历亮点 ──────────────────────────────────────────
+@st.cache_data
+def extract_resume_highlights(pdf_bytes):
+    """用AI从PDF提取3-5个核心亮点"""
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+        f.write(pdf_bytes)
+        tmp_path = f.name
+    
+    try:
+        reader = PyPDF2.PdfReader(tmp_path)
+        text = "\n".join([page.extract_text() for page in reader.pages])
+    finally:
+        os.unlink(tmp_path)
+    
+    prompt = f"""从以下简历中提取3-5个最核心的亮点，每个亮点一句话，用于求职邮件。
+要求：
+1. 突出量化成果（数字、项目数量、金额等）
+2. 突出相关经验（实习、项目、技能）
+3. 每个亮点15-25字
 
-    pos_patterns = [
-        r"招聘(.{2,20}?)(?:实习生|助理|分析师)",
-        r"[-–—]\s*(.{2,20}?)(?:实习生|助理|分析师)",
-        r"【(.{2,20}?)(?:实习生|助理|分析师)",
-    ]
-    position = "投资实习生"
-    for p in pos_patterns:
-        m = re.search(p, first_line)
-        if m:
-            position = m.group(1).strip() + "实习生"
-            break
+简历内容：
+{text[:3000]}
 
-    subject_fmt = None
-    for pattern in [r"邮件(?:主题|标题)[：:]\s*(.+)", r"邮件及简历命名格式[：:]\s*(.+)"]:
-        m = re.search(pattern, jd_text)
-        if m:
-            raw = m.group(1).strip().split("\n")[0]
-            raw = re.split(r"简历(?:标题|命名)[：:]", raw)[0].strip()
-            subject_fmt = raw
-            break
+请直接输出亮点列表，每行一个，格式：
+- 亮点1
+- 亮点2
+- 亮点3"""
 
-    resume_fmt = None
-    for pattern in [r"简历(?:命名|标题)[：:]\s*(.+)", r"邮件&简历命名[】\]]\s*(.+)"]:
-        m = re.search(pattern, jd_text)
-        if m:
-            s = m.group(1).strip().split("\n")[0]
-            resume_fmt = re.sub(r"[（(].*", "", s).strip()
-            break
-
-    return company, position, subject_fmt, resume_fmt
+    response = model.generate_content(prompt)
+    return response.text.strip()
 
 
-def detect_focus(jd_text):
-    jd_lower = jd_text.lower()
-    if any(k in jd_lower for k in ["blockchain", "defi", "crypto", "web3", "链上"]):
-        return "web3"
-    if any(k in jd_lower for k in ["business development", "bd", "合作"]):
-        return "bd"
-    if any(k in jd_lower for k in ["quant", "量化", "python", "数据分析"]):
-        return "quant"
-    return "investment"
+# ── AI解析JD ──────────────────────────────────────────────
+def ai_parse_jd(jd_text, name, school, major, grad_year, intern_period):
+    """用AI解析JD，提取公司、职位、邮件主题格式、简历命名格式"""
+    prompt = f"""解析以下招聘JD，提取关键信息。
+
+JD内容：
+{jd_text[:2000]}
+
+请提取：
+1. 公司名称（去掉【】等符号）
+2. 职位名称
+3. 邮件主题格式（如果JD中有明确要求，比如"邮件主题：xxx"，则提取；否则返回null）
+4. 简历文件命名格式（如果JD中有明确要求，比如"简历命名：xxx"，则提取；否则返回null）
+
+用户信息：
+- 姓名：{name}
+- 学校：{school}
+- 专业：{major}
+- 毕业时间：{grad_year}
+- 可实习时间：{intern_period}
+
+返回JSON格式：
+{{
+  "company": "公司名",
+  "position": "职位名",
+  "subject_format": "邮件主题格式（如有要求）或null",
+  "resume_format": "简历命名格式（如有要求）或null"
+}}"""
+
+    response = model.generate_content(prompt)
+    
+    import json
+    # 提取JSON（去掉markdown代码块标记）
+    text = response.text.strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+    
+    result = json.loads(text)
+    
+    # 如果没有格式要求，生成默认格式
+    if not result.get("subject_format") or result["subject_format"] == "null":
+        result["subject_format"] = f"求职申请-{name}-{school}-{result['position']}"
+    else:
+        # 替换占位符
+        s = result["subject_format"]
+        for k, v in {
+            "姓名": name, "学校": school, "专业": major,
+            "毕业时间": grad_year, "可入职时间": intern_period.split("至")[0] if "至" in intern_period else intern_period,
+        }.items():
+            s = s.replace(k, v)
+        result["subject_format"] = s
+    
+    if not result.get("resume_format") or result["resume_format"] == "null":
+        result["resume_format"] = f"{name}_简历_{result['position']}_{result['company']}.pdf"
+    else:
+        s = result["resume_format"]
+        for k, v in {
+            "姓名": name, "学校": school, "专业": major,
+            "毕业时间": grad_year, "到岗时间": intern_period.split("至")[0] if "至" in intern_period else intern_period,
+        }.items():
+            s = s.replace(k, v)
+        if not s.endswith(".pdf"):
+            s += ".pdf"
+        result["resume_format"] = s
+    
+    return result
 
 
-HIGHLIGHTS = {
-    "web3": "在0xU社区深度参与DeFi/链上交易，并担任WhaleRyder BD，具备Web3实战经验",
-    "investment": "在水木清华基金完成投后实习，跟踪150+项目，撰写200+页运营报告",
-    "quant": "具备Python/R面板数据分析经验，熟练使用Wind/CSMAR，完成绿色信贷量化研究",
-    "bd": "担任WhaleRyder BD及Finternet峰会志愿者组长，具备多语言商务沟通能力",
-}
+# ── AI生成邮件正文 ────────────────────────────────────────
+def ai_generate_body(company, position, jd_text, resume_highlights, name, school, major, grade, intern_period):
+    """用AI生成个性化邮件正文"""
+    prompt = f"""为求职邮件生成正文，要求：
+1. 100字以内
+2. 中文
+3. 结构：问候 + 自我介绍 + 1-2个核心匹配点 + 可实习时间 + 期待交流
+4. 核心匹配点要结合JD要求和简历亮点
 
+公司：{company}
+职位：{position}
+JD摘要：{jd_text[:500]}
 
-def make_subject(subject_fmt, company, position, name, school, major, grad_year, intern_period):
-    if not subject_fmt:
-        return f"求职申请-{name}-{school}-{position}"
-    s = subject_fmt.split("\n")[0]
-    for k, v in {
-        "最早可入职时间": intern_period.split("至")[0] if "至" in intern_period else intern_period,
-        "可入职时间": intern_period.split("至")[0] if "至" in intern_period else intern_period,
-        "最早可": intern_period.split("至")[0] if "至" in intern_period else intern_period,
-        "姓名": name, "名字": name,
-        "学校": school, "本科学校": school,
-        "专业": major, "岗位": position, "职位": position,
-        "毕业时间": grad_year, "毕业年份": grad_year[:4],
-        "一周几天": "5天", "硕士学校（若有）": "",
-    }.items():
-        s = s.replace(k, v)
-    return re.sub(r"[-–—]{2,}", "-", s).strip()
+简历亮点：
+{resume_highlights}
 
+个人信息：
+- 姓名：{name}
+- 学校：{school}
+- 专业：{major}
+- 年级：{grade}
+- 可实习时间：{intern_period}
 
-def make_resume_name(resume_fmt, company, position, name, school, major, grad_year, intern_period):
-    if not resume_fmt:
-        return f"{name}_简历_{position}_{company}.pdf"
-    s = resume_fmt.split("\n")[0]
-    s = re.sub(r"[（(].*", "", s).strip()
-    start = intern_period.split("至")[0] if "至" in intern_period else intern_period
-    for k, v in {
-        "姓名": name, "名字": name,
-        "学校": school, "本科学校": school,
-        "本科/研究生学校及专业": f"{school}{major}",
-        "专业": major, "岗位": position, "职位": position, "投递岗位": position,
-        "毕业时间": grad_year, "到岗时间": start,
-        "周实习X天": "周实习5天", "实习X个月": "实习4个月",
-        "年级": grade, "FA分析师助理": position, "人才战略": position,
-    }.items():
-        s = s.replace(k, v)
-    s = re.sub(r"[/\\:*?\"<>|]", "-", s)
-    s = re.sub(r"\s+", "", s)
-    if not s.endswith(".pdf"):
-        s += ".pdf"
-    return s
+直接输出邮件正文，不要任何额外说明。"""
 
-
-def make_body(company, position, focus, name, school, major, grade, intern_period):
-    highlight = HIGHLIGHTS.get(focus, HIGHLIGHTS["investment"])
-    return (
-        f"您好！\n\n"
-        f"我是{school}{major}{grade}学生{name}，对贵司{position}岗位非常感兴趣。"
-        f"{highlight}，与岗位要求高度匹配。"
-        f"可于{intern_period}全职实习，期待进一步交流。\n\n"
-        f"{name}"
-    )
+    response = model.generate_content(prompt)
+    return response.text.strip()
 
 
 # ── 生成预览 ──────────────────────────────────────────────
+if not all([name, school, major, grade, intern_period, grad_year]):
+    st.warning("请在左侧填写完整个人信息")
+    st.stop()
+
 jobs = load_jobs(excel_file.read())
 st.success(f"读取到 {len(jobs)} 个岗位")
 
 max_rows = st.slider("处理岗位数量", 1, len(jobs), min(5, len(jobs)))
 jobs = jobs[:max_rows]
 
-# 生成所有岗位数据
-previews = []
-for job in jobs:
-    company, position, subject_fmt, resume_fmt = parse_jd(job["jd"])
-    focus = detect_focus(job["jd"])
-    previews.append({
-        "company": company,
-        "position": position,
-        "email": job["email"],
-        "subject": make_subject(subject_fmt, company, position, name, school, major, grad_year, intern_period),
-        "resume_name": make_resume_name(resume_fmt, company, position, name, school, major, grad_year, intern_period),
-        "body": make_body(company, position, focus, name, school, major, grade, intern_period),
-        "focus": focus,
-    })
+# 提取简历亮点
+with st.spinner("AI正在分析简历..."):
+    resume_highlights = extract_resume_highlights(resume_file.read())
 
-# ── 预览表格 ──────────────────────────────────────────────
+st.info(f"简历亮点：\n{resume_highlights}")
+
+# 生成所有岗位数据
+if "previews" not in st.session_state:
+    with st.spinner("AI正在解析JD并生成邮件..."):
+        previews = []
+        for job in jobs:
+            parsed = ai_parse_jd(job["jd"], name, school, major, grad_year, intern_period)
+            body = ai_generate_body(
+                parsed["company"], parsed["position"], job["jd"],
+                resume_highlights, name, school, major, grade, intern_period
+            )
+            previews.append({
+                "company": parsed["company"],
+                "position": parsed["position"],
+                "email": job["email"],
+                "subject": parsed["subject_format"],
+                "resume_name": parsed["resume_format"],
+                "body": body,
+                "sent": False,
+            })
+        st.session_state.previews = previews
+else:
+    previews = st.session_state.previews
+
+# ── 预览表格（可编辑）──────────────────────────────────────
 st.divider()
-st.subheader("📋 预览")
+st.subheader("📋 预览与编辑")
 
 for i, p in enumerate(previews):
-    with st.expander(f"{i+1}. {p['company']} — {p['position']}"):
-        st.write(f"**收件人：** `{p['email']}`")
-        st.write(f"**主题：** {p['subject']}")
-        st.write(f"**附件：** {p['resume_name']}")
-        st.text_area("邮件正文", p["body"], height=160, key=f"body_{i}", disabled=True)
+    with st.expander(f"{'✅' if p['sent'] else '📧'} {i+1}. {p['company']} — {p['position']}", expanded=not p['sent']):
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.write(f"**收件人：** `{p['email']}`")
+        with col2:
+            if not p['sent']:
+                if st.button("发送此岗位", key=f"send_{i}", type="primary"):
+                    if not sender_email or not auth_code:
+                        st.error("请先填写邮箱配置")
+                    else:
+                        try:
+                            resume_bytes = resume_file.read()
+                            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+                                f.write(resume_bytes)
+                                tmp_pdf = f.name
 
-# ── 发送区域 ──────────────────────────────────────────────
+                            msg = MIMEMultipart()
+                            msg["From"] = sender_email
+                            msg["To"] = p["email"]
+                            msg["Subject"] = p["subject"]
+                            msg.attach(MIMEText(p["body"], "plain", "utf-8"))
+
+                            with open(tmp_pdf, "rb") as f:
+                                part = MIMEBase("application", "octet-stream")
+                                part.set_payload(f.read())
+                            encoders.encode_base64(part)
+                            part.add_header("Content-Disposition", "attachment",
+                                            filename=("utf-8", "", p["resume_name"]))
+                            msg.attach(part)
+
+                            with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
+                                server.login(sender_email, auth_code)
+                                server.sendmail(sender_email, p["email"], msg.as_string())
+
+                            os.unlink(tmp_pdf)
+                            st.session_state.previews[i]["sent"] = True
+                            st.success(f"✅ 已发送到 {p['email']}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"发送失败：{e}")
+            else:
+                st.success("已发送")
+        
+        # 可编辑字段
+        p["subject"] = st.text_input("邮件主题", p["subject"], key=f"subj_{i}")
+        p["resume_name"] = st.text_input("附件名称", p["resume_name"], key=f"resume_{i}")
+        p["body"] = st.text_area("邮件正文", p["body"], height=200, key=f"body_{i}")
+
+# ── 批量发送区域 ──────────────────────────────────────────
 st.divider()
-st.subheader("🚀 发送")
+st.subheader("🚀 批量发送")
 
 if not sender_email or not auth_code:
     st.warning("请在左侧填写发件邮箱和授权码")
     st.stop()
 
-send_to_self = st.checkbox("📬 先发给自己测试（不发给HR）", value=True)
+unsent = [p for p in previews if not p["sent"]]
+if not unsent:
+    st.info("所有岗位已发送完毕")
+    st.stop()
 
-if st.button("开始发送", type="primary", use_container_width=True):
+send_to_self = st.checkbox("📬 先发给自己测试（不发给HR）", value=False)
+
+if st.button(f"批量发送剩余 {len(unsent)} 个岗位", type="primary", use_container_width=True):
     resume_bytes = resume_file.read()
 
     progress = st.progress(0)
     status_box = st.empty()
-    results = []
 
-    for i, p in enumerate(previews):
-        status_box.info(f"正在发送 {i+1}/{len(previews)}：{p['company']}...")
+    for idx, i in enumerate([previews.index(p) for p in unsent]):
+        p = previews[i]
+        status_box.info(f"正在发送 {idx+1}/{len(unsent)}：{p['company']}...")
 
-        # 写临时PDF
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
             f.write(resume_bytes)
             tmp_pdf = f.name
@@ -264,16 +361,16 @@ if st.button("开始发送", type="primary", use_container_width=True):
                 server.login(sender_email, auth_code)
                 server.sendmail(sender_email, to_addr, msg.as_string())
 
-            results.append({"company": p["company"], "status": "✅ 已发送"})
-            time.sleep(1)
+            st.session_state.previews[i]["sent"] = True
+            time.sleep(1.5)
         except Exception as e:
-            results.append({"company": p["company"], "status": f"❌ {e}"})
+            status_box.error(f"❌ {p['company']} 发送失败：{e}")
+            time.sleep(2)
         finally:
             os.unlink(tmp_pdf)
 
-        progress.progress((i + 1) / len(previews))
+        progress.progress((idx + 1) / len(unsent))
 
     status_box.empty()
-    st.success("发送完成！")
-    for r in results:
-        st.write(f"{r['status']} — {r['company']}")
+    st.success("批量发送完成！")
+    st.rerun()
