@@ -18,7 +18,7 @@ import PyPDF2
 import streamlit as st
 
 # ── 页面配置 ──────────────────────────────────────────────
-st.set_page_config(page_title="AI求职助手", page_icon="📨", layout="wide")
+st.set_page_config(page_title="爽投投 - AI求职助手", page_icon="🎯", layout="wide")
 
 # OpenAI兼容API配置
 API_KEY = os.getenv("API_KEY", "")
@@ -31,23 +31,59 @@ if not API_KEY:
 
 client = openai.OpenAI(api_key=API_KEY, base_url=API_BASE)
 
-st.title("📨 AI求职助手")
-st.caption("上传简历和岗位Excel，自动生成定制邮件并发送")
+st.title("🎯 爽投投")
+st.caption("AI智能求职助手 - 精准筛选、智能生成、高效投递 | 原作者：[@Milkyelephants](https://twitter.com/Milkyelephants)")
 
 # ── 侧边栏：用户配置 ──────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ 个人配置")
-    name = st.text_input("姓名", placeholder="张三")
-    school = st.text_input("学校", placeholder="清华大学")
-    major = st.text_input("专业", placeholder="计算机科学")
-    grade = st.text_input("年级", placeholder="大三")
-    intern_period = st.text_input("可实习时间", placeholder="2025年7月至10月")
-    grad_year = st.text_input("毕业时间", placeholder="2026年6月")
+    
+    # 简历上传（提前到这里，用于自动填充）
+    resume_file_sidebar = st.file_uploader("📄 上传简历 PDF（自动识别信息）", type=["pdf"], key="resume_sidebar")
+    
+    if resume_file_sidebar and "user_info" not in st.session_state:
+        with st.spinner("AI正在识别简历信息..."):
+            resume_bytes = resume_file_sidebar.read()
+            user_info = extract_user_info_from_resume(resume_bytes)
+            st.session_state.user_info = user_info
+            st.success("✅ 简历信息已自动识别")
+    
+    # 使用识别的信息或空值
+    default_info = st.session_state.get("user_info", {})
+    
+    name = st.text_input("姓名", value=default_info.get("name", ""), placeholder="张三")
+    school = st.text_input("学校", value=default_info.get("school", ""), placeholder="清华大学")
+    major = st.text_input("专业", value=default_info.get("major", ""), placeholder="计算机科学")
+    grade = st.text_input("年级", value=default_info.get("grade", ""), placeholder="大三")
+    intern_period = st.text_input("可实习时间", value=default_info.get("intern_period", ""), placeholder="2025年7月至10月")
+    grad_year = st.text_input("毕业时间", value=default_info.get("grad_year", ""), placeholder="2026年6月")
 
     st.divider()
     st.header("📧 邮箱配置")
     sender_email = st.text_input("发件邮箱", placeholder="xxxxxx@qq.com")
     auth_code = st.text_input("授权码", type="password", placeholder="QQ邮箱授权码")
+    
+    with st.expander("❓ 如何获取授权码"):
+        st.markdown("""
+**QQ邮箱：**
+1. 登录 [mail.qq.com](https://mail.qq.com)
+2. 设置 → 账户 → POP3/IMAP/SMTP服务
+3. 开启服务 → 生成授权码
+
+**163邮箱：**
+1. 登录 [mail.163.com](https://mail.163.com)
+2. 设置 → POP3/SMTP/IMAP
+3. 开启服务 → 新增授权密码
+
+**Gmail：**
+1. Google账号 → 安全性
+2. 两步验证（必须开启）
+3. 应用专用密码 → 生成
+
+**Outlook：**
+1. 账户设置 → 安全性
+2. 应用密码 → 创建新密码
+        """)
 
     smtp_options = {
         "QQ邮箱 (@qq.com)": ("smtp.qq.com", 465),
@@ -87,6 +123,102 @@ def load_jobs(excel_bytes):
         jobs.append({"jd": str(jd_text).strip(), "email": str(email).strip()})
     os.unlink(tmp_path)
     return jobs
+
+
+# ── AI分析岗位分类 ────────────────────────────────────────
+@st.cache_data
+def analyze_job_categories(jobs_text):
+    """AI分析岗位，返回分类和标签"""
+    prompt = f"""分析以下岗位，按行业/领域分类。
+
+岗位列表（公司-职位）：
+{jobs_text[:3000]}
+
+要求：
+1. 识别主要行业类别（如：科技投资、消费投资、PE/VC、咨询、金融科技等）
+2. 每个类别列出包含的公司
+3. 返回JSON格式
+
+返回格式：
+{{
+  "categories": [
+    {{
+      "name": "类别名",
+      "description": "简短描述",
+      "companies": ["公司1", "公司2"]
+    }}
+  ]
+}}"""
+
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=800,
+        temperature=0.5
+    )
+    
+    import json
+    text = response.choices[0].message.content.strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+    
+    return json.loads(text)
+
+
+# ── 提取简历个人信息 ──────────────────────────────────────
+@st.cache_data
+def extract_user_info_from_resume(pdf_bytes):
+    """用AI从简历PDF提取个人信息"""
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+        f.write(pdf_bytes)
+        tmp_path = f.name
+    
+    try:
+        reader = PyPDF2.PdfReader(tmp_path)
+        text = "\n".join([page.extract_text() for page in reader.pages])
+    finally:
+        os.unlink(tmp_path)
+    
+    prompt = f"""从以下简历中提取个人基本信息，返回JSON格式。
+
+简历内容：
+{text[:2000]}
+
+提取字段：
+- name: 姓名
+- school: 学校（本科或最高学历）
+- major: 专业
+- grade: 年级（如"大三"、"研一"，如果是应届生写"应届"）
+- grad_year: 毕业时间（格式：YYYY年MM月）
+- intern_period: 可实习时间（如果简历中有提及，否则留空）
+
+返回JSON：
+{{
+  "name": "姓名",
+  "school": "学校",
+  "major": "专业",
+  "grade": "年级",
+  "grad_year": "毕业时间",
+  "intern_period": "可实习时间或空"
+}}"""
+
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=300,
+        temperature=0.3
+    )
+    
+    import json
+    text = response.choices[0].message.content.strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+    
+    return json.loads(text)
 
 
 # ── 提取简历亮点 ──────────────────────────────────────────
