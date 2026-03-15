@@ -126,19 +126,72 @@ def extract_resume_highlights(pdf_bytes):
 
 @st.cache_data
 def load_jobs(excel_bytes):
+    """AI自动识别Excel格式并读取岗位"""
     with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
         f.write(excel_bytes)
         tmp_path = f.name
+    
     wb = openpyxl.load_workbook(tmp_path)
     ws = wb.active
+    
+    # 读取前10行用于AI分析格式
+    sample_rows = []
+    for i, row in enumerate(ws.iter_rows(values_only=True)):
+        if i < 10:
+            sample_rows.append(row)
+        else:
+            break
+    
+    # AI识别格式
+    sample_text = "\n".join([f"第{i+1}行: {row}" for i, row in enumerate(sample_rows)])
+    
+    prompt = f"""分析Excel表格格式，识别哪一列是JD描述，哪一列是邮箱，从第几行开始是数据。
+
+前10行内容：
+{sample_text}
+
+返回JSON：
+{{
+  "jd_column": JD描述所在列号（从0开始，如第3列=2）,
+  "email_column": 邮箱所在列号（从0开始）,
+  "start_row": 数据起始行号（从1开始）
+}}
+
+提示：
+- JD列通常包含公司名、职位、职责等长文本
+- 邮箱列包含@符号的邮箱地址
+- 数据通常从第3-5行开始（前面可能是标题）"""
+
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=200,
+        temperature=0.3
+    )
+    
+    import json
+    text = response.choices[0].message.content.strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+    
+    format_info = json.loads(text)
+    jd_col = format_info["jd_column"]
+    email_col = format_info["email_column"]
+    start_row = format_info["start_row"]
+    
+    # 根据识别的格式读取数据
     jobs = []
-    for row in ws.iter_rows(min_row=4, values_only=True):
-        if len(row) < 4:
+    for row in ws.iter_rows(min_row=start_row, values_only=True):
+        if len(row) <= max(jd_col, email_col):
             continue
-        jd_text, email = row[2], row[3]
+        jd_text = row[jd_col]
+        email = row[email_col]
         if not jd_text or not email:
             continue
         jobs.append({"jd": str(jd_text).strip(), "email": str(email).strip()})
+    
     os.unlink(tmp_path)
     return jobs
 
