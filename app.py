@@ -31,6 +31,226 @@ if not API_KEY:
 
 client = openai.OpenAI(api_key=API_KEY, base_url=API_BASE)
 
+# ══════════════════════════════════════════════════════════
+# 工具函数（必须在使用前定义）
+# ══════════════════════════════════════════════════════════
+
+@st.cache_data
+def extract_user_info_from_resume(pdf_bytes):
+    """用AI从简历PDF提取个人信息"""
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+        f.write(pdf_bytes)
+        tmp_path = f.name
+    
+    try:
+        reader = PyPDF2.PdfReader(tmp_path)
+        text = "\n".join([page.extract_text() for page in reader.pages])
+    finally:
+        os.unlink(tmp_path)
+    
+    prompt = f"""从以下简历中提取个人基本信息，返回JSON格式。
+
+简历内容：
+{text[:2000]}
+
+提取字段：
+- name: 姓名
+- school: 学校（本科或最高学历）
+- major: 专业
+- grade: 年级（如"大三"、"研一"，如果是应届生写"应届"）
+- grad_year: 毕业时间（格式：YYYY年MM月）
+- intern_period: 可实习时间（如果简历中有提及，否则留空）
+
+返回JSON：
+{{
+  "name": "姓名",
+  "school": "学校",
+  "major": "专业",
+  "grade": "年级",
+  "grad_year": "毕业时间",
+  "intern_period": "可实习时间或空"
+}}"""
+
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=300,
+        temperature=0.3
+    )
+    
+    import json
+    text = response.choices[0].message.content.strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+    
+    return json.loads(text)
+
+
+@st.cache_data
+def extract_resume_highlights(pdf_bytes):
+    """用AI从PDF提取3-5个核心亮点"""
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+        f.write(pdf_bytes)
+        tmp_path = f.name
+    
+    try:
+        reader = PyPDF2.PdfReader(tmp_path)
+        text = "\n".join([page.extract_text() for page in reader.pages])
+    finally:
+        os.unlink(tmp_path)
+    
+    prompt = f"""从以下简历中提取3-5个最核心的亮点，每个亮点一句话，用于求职邮件。
+要求：
+1. 突出量化成果（数字、项目数量、金额等）
+2. 突出相关经验（实习、项目、技能）
+3. 每个亮点15-25字
+
+简历内容：
+{text[:3000]}
+
+请直接输出亮点列表，每行一个，格式：
+- 亮点1
+- 亮点2
+- 亮点3"""
+
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=500,
+        temperature=0.7
+    )
+    return response.choices[0].message.content.strip()
+
+
+@st.cache_data
+def load_jobs(excel_bytes):
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        f.write(excel_bytes)
+        tmp_path = f.name
+    wb = openpyxl.load_workbook(tmp_path)
+    ws = wb.active
+    jobs = []
+    for row in ws.iter_rows(min_row=4, values_only=True):
+        if len(row) < 4:
+            continue
+        jd_text, email = row[2], row[3]
+        if not jd_text or not email:
+            continue
+        jobs.append({"jd": str(jd_text).strip(), "email": str(email).strip()})
+    os.unlink(tmp_path)
+    return jobs
+
+
+def ai_parse_jd(jd_text, name, school, major, grad_year, intern_period):
+    """用AI解析JD，提取公司、职位、邮件主题格式、简历命名格式"""
+    prompt = f"""解析以下招聘JD，提取关键信息。
+
+JD内容：
+{jd_text[:2000]}
+
+请提取：
+1. 公司名称（去掉【】等符号）
+2. 职位名称
+3. 邮件主题格式（如果JD中有明确要求，比如"邮件主题：xxx"，则提取；否则返回null）
+4. 简历文件命名格式（如果JD中有明确要求，比如"简历命名：xxx"，则提取；否则返回null）
+
+用户信息：
+- 姓名：{name}
+- 学校：{school}
+- 专业：{major}
+- 毕业时间：{grad_year}
+- 可实习时间：{intern_period}
+
+返回JSON格式：
+{{
+  "company": "公司名",
+  "position": "职位名",
+  "subject_format": "邮件主题格式（如有要求）或null",
+  "resume_format": "简历命名格式（如有要求）或null"
+}}"""
+
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=300,
+        temperature=0.7
+    )
+    
+    import json
+    text = response.choices[0].message.content.strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+    
+    result = json.loads(text)
+    
+    if not result.get("subject_format") or result["subject_format"] == "null":
+        result["subject_format"] = f"求职申请-{name}-{school}-{result['position']}"
+    else:
+        s = result["subject_format"]
+        for k, v in {
+            "姓名": name, "学校": school, "专业": major,
+            "毕业时间": grad_year, "可入职时间": intern_period.split("至")[0] if "至" in intern_period else intern_period,
+        }.items():
+            s = s.replace(k, v)
+        result["subject_format"] = s
+    
+    if not result.get("resume_format") or result["resume_format"] == "null":
+        result["resume_format"] = f"{name}_简历_{result['position']}_{result['company']}.pdf"
+    else:
+        s = result["resume_format"]
+        for k, v in {
+            "姓名": name, "学校": school, "专业": major,
+            "毕业时间": grad_year, "到岗时间": intern_period.split("至")[0] if "至" in intern_period else intern_period,
+        }.items():
+            s = s.replace(k, v)
+        if not s.endswith(".pdf"):
+            s += ".pdf"
+        result["resume_format"] = s
+    
+    return result
+
+
+def ai_generate_body(company, position, jd_text, resume_highlights, name, school, major, grade, intern_period):
+    """用AI生成个性化邮件正文"""
+    prompt = f"""为求职邮件生成正文，要求：
+1. 100字以内
+2. 中文
+3. 结构：问候 + 自我介绍 + 1-2个核心匹配点 + 可实习时间 + 期待交流
+4. 核心匹配点要结合JD要求和简历亮点
+
+公司：{company}
+职位：{position}
+JD摘要：{jd_text[:500]}
+
+简历亮点：
+{resume_highlights}
+
+个人信息：
+- 姓名：{name}
+- 学校：{school}
+- 专业：{major}
+- 年级：{grade}
+- 可实习时间：{intern_period}
+
+直接输出邮件正文，不要任何额外说明。"""
+
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=300,
+        temperature=0.7
+    )
+    return response.choices[0].message.content.strip()
+
+
+# ══════════════════════════════════════════════════════════
+# 页面布局
+# ══════════════════════════════════════════════════════════
+
 st.title("🎯 爽投投")
 st.caption("AI智能求职助手 - 精准筛选、智能生成、高效投递 | 原作者：[@Milkyelephants](https://twitter.com/Milkyelephants)")
 
@@ -105,269 +325,7 @@ if not resume_file or not excel_file:
     st.info("请上传简历PDF和岗位Excel后继续")
     st.stop()
 
-# ── 解析Excel ─────────────────────────────────────────────
-@st.cache_data
-def load_jobs(excel_bytes):
-    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
-        f.write(excel_bytes)
-        tmp_path = f.name
-    wb = openpyxl.load_workbook(tmp_path)
-    ws = wb.active
-    jobs = []
-    for row in ws.iter_rows(min_row=4, values_only=True):
-        if len(row) < 4:
-            continue
-        jd_text, email = row[2], row[3]
-        if not jd_text or not email:
-            continue
-        jobs.append({"jd": str(jd_text).strip(), "email": str(email).strip()})
-    os.unlink(tmp_path)
-    return jobs
 
-
-# ── AI分析岗位分类 ────────────────────────────────────────
-@st.cache_data
-def analyze_job_categories(jobs_text):
-    """AI分析岗位，返回分类和标签"""
-    prompt = f"""分析以下岗位，按行业/领域分类。
-
-岗位列表（公司-职位）：
-{jobs_text[:3000]}
-
-要求：
-1. 识别主要行业类别（如：科技投资、消费投资、PE/VC、咨询、金融科技等）
-2. 每个类别列出包含的公司
-3. 返回JSON格式
-
-返回格式：
-{{
-  "categories": [
-    {{
-      "name": "类别名",
-      "description": "简短描述",
-      "companies": ["公司1", "公司2"]
-    }}
-  ]
-}}"""
-
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=800,
-        temperature=0.5
-    )
-    
-    import json
-    text = response.choices[0].message.content.strip()
-    if "```json" in text:
-        text = text.split("```json")[1].split("```")[0].strip()
-    elif "```" in text:
-        text = text.split("```")[1].split("```")[0].strip()
-    
-    return json.loads(text)
-
-
-# ── 提取简历个人信息 ──────────────────────────────────────
-@st.cache_data
-def extract_user_info_from_resume(pdf_bytes):
-    """用AI从简历PDF提取个人信息"""
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-        f.write(pdf_bytes)
-        tmp_path = f.name
-    
-    try:
-        reader = PyPDF2.PdfReader(tmp_path)
-        text = "\n".join([page.extract_text() for page in reader.pages])
-    finally:
-        os.unlink(tmp_path)
-    
-    prompt = f"""从以下简历中提取个人基本信息，返回JSON格式。
-
-简历内容：
-{text[:2000]}
-
-提取字段：
-- name: 姓名
-- school: 学校（本科或最高学历）
-- major: 专业
-- grade: 年级（如"大三"、"研一"，如果是应届生写"应届"）
-- grad_year: 毕业时间（格式：YYYY年MM月）
-- intern_period: 可实习时间（如果简历中有提及，否则留空）
-
-返回JSON：
-{{
-  "name": "姓名",
-  "school": "学校",
-  "major": "专业",
-  "grade": "年级",
-  "grad_year": "毕业时间",
-  "intern_period": "可实习时间或空"
-}}"""
-
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=300,
-        temperature=0.3
-    )
-    
-    import json
-    text = response.choices[0].message.content.strip()
-    if "```json" in text:
-        text = text.split("```json")[1].split("```")[0].strip()
-    elif "```" in text:
-        text = text.split("```")[1].split("```")[0].strip()
-    
-    return json.loads(text)
-
-
-# ── 提取简历亮点 ──────────────────────────────────────────
-@st.cache_data
-def extract_resume_highlights(pdf_bytes):
-    """用AI从PDF提取3-5个核心亮点"""
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-        f.write(pdf_bytes)
-        tmp_path = f.name
-    
-    try:
-        reader = PyPDF2.PdfReader(tmp_path)
-        text = "\n".join([page.extract_text() for page in reader.pages])
-    finally:
-        os.unlink(tmp_path)
-    
-    prompt = f"""从以下简历中提取3-5个最核心的亮点，每个亮点一句话，用于求职邮件。
-要求：
-1. 突出量化成果（数字、项目数量、金额等）
-2. 突出相关经验（实习、项目、技能）
-3. 每个亮点15-25字
-
-简历内容：
-{text[:3000]}
-
-请直接输出亮点列表，每行一个，格式：
-- 亮点1
-- 亮点2
-- 亮点3"""
-
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=500,
-        temperature=0.7
-    )
-    return response.choices[0].message.content.strip()
-
-
-# ── AI解析JD ──────────────────────────────────────────────
-def ai_parse_jd(jd_text, name, school, major, grad_year, intern_period):
-    """用AI解析JD，提取公司、职位、邮件主题格式、简历命名格式"""
-    prompt = f"""解析以下招聘JD，提取关键信息。
-
-JD内容：
-{jd_text[:2000]}
-
-请提取：
-1. 公司名称（去掉【】等符号）
-2. 职位名称
-3. 邮件主题格式（如果JD中有明确要求，比如"邮件主题：xxx"，则提取；否则返回null）
-4. 简历文件命名格式（如果JD中有明确要求，比如"简历命名：xxx"，则提取；否则返回null）
-
-用户信息：
-- 姓名：{name}
-- 学校：{school}
-- 专业：{major}
-- 毕业时间：{grad_year}
-- 可实习时间：{intern_period}
-
-返回JSON格式：
-{{
-  "company": "公司名",
-  "position": "职位名",
-  "subject_format": "邮件主题格式（如有要求）或null",
-  "resume_format": "简历命名格式（如有要求）或null"
-}}"""
-
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=300,
-        temperature=0.7
-    )
-    
-    import json
-    # 提取JSON（去掉markdown代码块标记）
-    text = response.choices[0].message.content.strip()
-    if "```json" in text:
-        text = text.split("```json")[1].split("```")[0].strip()
-    elif "```" in text:
-        text = text.split("```")[1].split("```")[0].strip()
-    
-    result = json.loads(text)
-    
-    # 如果没有格式要求，生成默认格式
-    if not result.get("subject_format") or result["subject_format"] == "null":
-        result["subject_format"] = f"求职申请-{name}-{school}-{result['position']}"
-    else:
-        # 替换占位符
-        s = result["subject_format"]
-        for k, v in {
-            "姓名": name, "学校": school, "专业": major,
-            "毕业时间": grad_year, "可入职时间": intern_period.split("至")[0] if "至" in intern_period else intern_period,
-        }.items():
-            s = s.replace(k, v)
-        result["subject_format"] = s
-    
-    if not result.get("resume_format") or result["resume_format"] == "null":
-        result["resume_format"] = f"{name}_简历_{result['position']}_{result['company']}.pdf"
-    else:
-        s = result["resume_format"]
-        for k, v in {
-            "姓名": name, "学校": school, "专业": major,
-            "毕业时间": grad_year, "到岗时间": intern_period.split("至")[0] if "至" in intern_period else intern_period,
-        }.items():
-            s = s.replace(k, v)
-        if not s.endswith(".pdf"):
-            s += ".pdf"
-        result["resume_format"] = s
-    
-    return result
-
-
-# ── AI生成邮件正文 ────────────────────────────────────────
-def ai_generate_body(company, position, jd_text, resume_highlights, name, school, major, grade, intern_period):
-    """用AI生成个性化邮件正文"""
-    prompt = f"""为求职邮件生成正文，要求：
-1. 100字以内
-2. 中文
-3. 结构：问候 + 自我介绍 + 1-2个核心匹配点 + 可实习时间 + 期待交流
-4. 核心匹配点要结合JD要求和简历亮点
-
-公司：{company}
-职位：{position}
-JD摘要：{jd_text[:500]}
-
-简历亮点：
-{resume_highlights}
-
-个人信息：
-- 姓名：{name}
-- 学校：{school}
-- 专业：{major}
-- 年级：{grade}
-- 可实习时间：{intern_period}
-
-直接输出邮件正文，不要任何额外说明。"""
-
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=300,
-        temperature=0.7
-    )
-    return response.choices[0].message.content.strip()
-
-
-# ── 生成预览 ──────────────────────────────────────────────
 if not all([name, school, major, grade, intern_period, grad_year]):
     st.warning("请在左侧填写完整个人信息")
     st.stop()
